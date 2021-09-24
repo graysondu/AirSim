@@ -5,7 +5,6 @@
 #include "RenderRequest.h"
 #include "common/ClockFactory.hpp"
 
-
 UnrealImageCapture::UnrealImageCapture(const common_utils::UniqueValueMap<std::string, APIPCamera*>* cameras)
     : cameras_(cameras)
 {
@@ -14,10 +13,11 @@ UnrealImageCapture::UnrealImageCapture(const common_utils::UniqueValueMap<std::s
 }
 
 UnrealImageCapture::~UnrealImageCapture()
-{}
+{
+}
 
-void UnrealImageCapture::getImages(const std::vector<msr::airlib::ImageCaptureBase::ImageRequest>& requests, 
-    std::vector<msr::airlib::ImageCaptureBase::ImageResponse>& responses) const
+void UnrealImageCapture::getImages(const std::vector<msr::airlib::ImageCaptureBase::ImageRequest>& requests,
+                                   std::vector<msr::airlib::ImageCaptureBase::ImageResponse>& responses) const
 {
     if (cameras_->valsSize() == 0) {
         for (unsigned int i = 0; i < requests.size(); ++i) {
@@ -29,21 +29,34 @@ void UnrealImageCapture::getImages(const std::vector<msr::airlib::ImageCaptureBa
         getSceneCaptureImage(requests, responses, false);
 }
 
-
-void UnrealImageCapture::getSceneCaptureImage(const std::vector<msr::airlib::ImageCaptureBase::ImageRequest>& requests, 
-    std::vector<msr::airlib::ImageCaptureBase::ImageResponse>& responses, bool use_safe_method) const
+void UnrealImageCapture::getSceneCaptureImage(const std::vector<msr::airlib::ImageCaptureBase::ImageRequest>& requests,
+                                              std::vector<msr::airlib::ImageCaptureBase::ImageResponse>& responses, bool use_safe_method) const
 {
     std::vector<std::shared_ptr<RenderRequest::RenderParams>> render_params;
     std::vector<std::shared_ptr<RenderRequest::RenderResult>> render_results;
 
+    bool visibilityChanged = false;
     for (unsigned int i = 0; i < requests.size(); ++i) {
         APIPCamera* camera = cameras_->at(requests.at(i).camera_name);
+        //TODO: may be we should have these methods non-const?
+        visibilityChanged = const_cast<UnrealImageCapture*>(this)->updateCameraVisibility(camera, requests[i]) || visibilityChanged;
+    }
+
+    if (use_safe_method && visibilityChanged) {
+        // We don't do game/render thread synchronization for safe method.
+        // We just blindly sleep for 200ms (the old way)
+        std::this_thread::sleep_for(std::chrono::duration<double>(0.2));
+    }
+
+    UGameViewportClient* gameViewport = nullptr;
+    for (unsigned int i = 0; i < requests.size(); ++i) {
+        APIPCamera* camera = cameras_->at(requests.at(i).camera_name);
+        if (gameViewport == nullptr) {
+            gameViewport = camera->GetWorld()->GetGameViewport();
+        }
+
         responses.push_back(ImageResponse());
         ImageResponse& response = responses.at(i);
-
-        //TODO: may be we should have these methods non-const?
-        const_cast<UnrealImageCapture*>(this)->
-            updateCameraVisibility(camera, requests[i]);
 
         UTextureRenderTarget2D* textureTarget = nullptr;
         USceneCaptureComponent2D* capture = camera->getCaptureComponent(requests[i].image_type, false);
@@ -53,54 +66,64 @@ void UnrealImageCapture::getSceneCaptureImage(const std::vector<msr::airlib::Ima
         else if (capture->TextureTarget == nullptr) {
             response.message = "Can't take screenshot because texture target is null";
         }
-        else 
+        else
             textureTarget = capture->TextureTarget;
 
-        render_params.push_back(std::make_shared<RenderRequest::RenderParams>(textureTarget, requests[i].pixels_as_float, requests[i].compress));
+        render_params.push_back(std::make_shared<RenderRequest::RenderParams>(capture, textureTarget, requests[i].pixels_as_float, requests[i].compress));
     }
 
-    RenderRequest render_request(use_safe_method);
-    render_request.getScreenshot(render_params.data(), render_results, render_params.size());
+    if (nullptr == gameViewport) {
+        return;
+    }
+
+    auto query_camera_pose_cb = [this, &requests, &responses]() {
+        size_t count = requests.size();
+        for (size_t i = 0; i < count; i++) {
+            const ImageRequest& request = requests.at(i);
+            APIPCamera* camera = cameras_->at(request.camera_name);
+            ImageResponse& response = responses.at(i);
+            auto camera_pose = camera->getPose();
+            response.camera_position = camera_pose.position;
+            response.camera_orientation = camera_pose.orientation;
+        }
+    };
+    RenderRequest render_request{ gameViewport, std::move(query_camera_pose_cb) };
+
+    render_request.getScreenshot(render_params.data(), render_results, render_params.size(), use_safe_method);
 
     for (unsigned int i = 0; i < requests.size(); ++i) {
         const ImageRequest& request = requests.at(i);
         ImageResponse& response = responses.at(i);
-        APIPCamera* camera = cameras_->at(request.camera_name);
-              
+
         response.camera_name = request.camera_name;
         response.time_stamp = render_results[i]->time_stamp;
         response.image_data_uint8 = std::vector<uint8_t>(render_results[i]->image_data_uint8.GetData(), render_results[i]->image_data_uint8.GetData() + render_results[i]->image_data_uint8.Num());
         response.image_data_float = std::vector<float>(render_results[i]->image_data_float.GetData(), render_results[i]->image_data_float.GetData() + render_results[i]->image_data_float.Num());
 
-        msr::airlib::Pose pose = camera->getPose();
-        response.camera_position = pose.position;
-        response.camera_orientation = pose.orientation;
+        if (use_safe_method) {
+            // Currently, we don't have a way to synthronize image capturing and camera pose when safe method is used,
+            APIPCamera* camera = cameras_->at(request.camera_name);
+            msr::airlib::Pose pose = camera->getPose();
+            response.camera_position = pose.position;
+            response.camera_orientation = pose.orientation;
+        }
         response.pixels_as_float = request.pixels_as_float;
         response.compress = request.compress;
         response.width = render_results[i]->width;
         response.height = render_results[i]->height;
         response.image_type = request.image_type;
     }
-
 }
 
-
-void UnrealImageCapture::updateCameraVisibility(APIPCamera* camera, const msr::airlib::ImageCaptureBase::ImageRequest& request)
+bool UnrealImageCapture::updateCameraVisibility(APIPCamera* camera, const msr::airlib::ImageCaptureBase::ImageRequest& request)
 {
     bool visibilityChanged = false;
-    if (! camera->getCameraTypeEnabled(request.image_type)) {
+    if (!camera->getCameraTypeEnabled(request.image_type)) {
         camera->setCameraTypeEnabled(request.image_type, true);
         visibilityChanged = true;
     }
 
-    if (visibilityChanged) {
-        // Wait for render so that view is ready for capture
-        std::this_thread::sleep_for(std::chrono::duration<double>(0.2));
-        // not sure why this doesn't work.
-        //DECLARE_CYCLE_STAT(TEXT("FNullGraphTask.CheckRenderStatus"), STAT_FNullGraphTask_CheckRenderStatus, STATGROUP_TaskGraphTasks);
-        //auto renderStatus = TGraphTask<FNullGraphTask>::CreateTask(NULL).ConstructAndDispatchWhenReady(GET_STATID(STAT_FNullGraphTask_CheckRenderStatus), ENamedThreads::RenderThread);
-        //FTaskGraphInterface::Get().WaitUntilTaskCompletes(renderStatus);
-    }
+    return visibilityChanged;
 }
 
 bool UnrealImageCapture::getScreenshotScreen(ImageType image_type, std::vector<uint8_t>& compressedPng)
@@ -109,7 +132,7 @@ bool UnrealImageCapture::getScreenshotScreen(ImageType image_type, std::vector<u
     return true;
 }
 
-void UnrealImageCapture::addScreenCaptureHandler(UWorld *world)
+void UnrealImageCapture::addScreenCaptureHandler(UWorld* world)
 {
     static bool is_installed = false;
 
@@ -117,17 +140,16 @@ void UnrealImageCapture::addScreenCaptureHandler(UWorld *world)
         UGameViewportClient* ViewportClient = world->GetGameViewport();
         ViewportClient->OnScreenshotCaptured().Clear();
         ViewportClient->OnScreenshotCaptured().AddLambda(
-            [this](int32 SizeX, int32 SizeY, const TArray<FColor>& Bitmap)
-        {
-            // Make sure that all alpha values are opaque.
-            TArray<FColor>& RefBitmap = const_cast<TArray<FColor>&>(Bitmap);
-            for(auto& Color : RefBitmap)
-                Color.A = 255;
+            [this](int32 SizeX, int32 SizeY, const TArray<FColor>& Bitmap) {
+                // Make sure that all alpha values are opaque.
+                TArray<FColor>& RefBitmap = const_cast<TArray<FColor>&>(Bitmap);
+                for (auto& Color : RefBitmap)
+                    Color.A = 255;
 
-            TArray<uint8_t> last_compressed_png;
-            FImageUtils::CompressImageArray(SizeX, SizeY, RefBitmap, last_compressed_png);
-            last_compressed_png_ = std::vector<uint8_t>(last_compressed_png.GetData(), last_compressed_png.GetData() + last_compressed_png.Num());
-        });
+                TArray<uint8_t> last_compressed_png;
+                FImageUtils::CompressImageArray(SizeX, SizeY, RefBitmap, last_compressed_png);
+                last_compressed_png_ = std::vector<uint8_t>(last_compressed_png.GetData(), last_compressed_png.GetData() + last_compressed_png.Num());
+            });
 
         is_installed = true;
     }

@@ -1,6 +1,6 @@
 import setup_path 
 import airsim
-
+import os
 import sys
 import math
 import time
@@ -38,7 +38,7 @@ class OrbitNavigator:
         # center is just a direction vector, so normalize it to compute the actual cx,cy locations.
         cx = float(center[0])
         cy = float(center[1])
-        length = math.sqrt(cx*cx)+(cy*cy)
+        length = math.sqrt((cx*cx) + (cy*cy))
         cx /= length
         cy /= length
         cx *= self.radius
@@ -53,7 +53,7 @@ class OrbitNavigator:
         start = time.time()
         count = 0
         while count < 100:
-            pos = self.home
+            pos = self.client.getMultirotorState().kinematics_estimated.position
             if abs(pos.z_val - self.home.z_val) > 1:                                
                 count = 0
                 self.home = pos
@@ -63,7 +63,7 @@ class OrbitNavigator:
             else:
                 count += 1
 
-        self.center = self.client.getMultirotorState().kinematics_estimated.position
+        self.center = pos
         self.center.x_val += cx
         self.center.y_val += cy
 
@@ -74,14 +74,14 @@ class OrbitNavigator:
         # AirSim uses NED coordinates so negative axis is up.
         start = self.client.getMultirotorState().kinematics_estimated.position
         landed = self.client.getMultirotorState().landed_state
-        if landed == airsim.LandedState.Landed: 
+        if not self.takeoff and landed == airsim.LandedState.Landed: 
             self.takeoff = True
             print("taking off...")
             self.client.takeoffAsync().join()
             start = self.client.getMultirotorState().kinematics_estimated.position
             z = -self.altitude + self.home.z_val
         else:
-            print("already flying so we will orbit at current altitude {}".format(start.z))                
+            print("already flying so we will orbit at current altitude {}".format(start.z_val))
             z = start.z_val # use current altitude then
 
         print("climbing to position: {},{},{}".format(start.x_val, start.y_val, z))
@@ -98,7 +98,8 @@ class OrbitNavigator:
         self.start_time = time.time()        
 
         while count < self.iterations:
-
+            if self.snapshots > 0 and not (self.snapshot_index < self.snapshots):
+                break
             # ramp up to full speed in smooth increments so we don't start too aggressively.
             now = time.time()
             speed = self.speed
@@ -144,7 +145,7 @@ class OrbitNavigator:
                 self.client.moveToPositionAsync(start.x_val, start.y_val, self.home.z_val - 5, 2).join()
 
             print("landing...")
-            self.client.land()
+            self.client.landAsync().join()
 
             print("disarming.")
             self.client.armDisarm(False)
@@ -199,8 +200,9 @@ class OrbitNavigator:
                 self.previous_sign = direction
             elif self.previous_sign > 0 and direction < 0:
                 if diff < 45:
-                    crossing = True
                     self.quarter = False
+                    if self.snapshots <= self.snapshot_index + 1:
+                        crossing = True
             self.previous_sign = direction
         self.previous_diff = diff
 

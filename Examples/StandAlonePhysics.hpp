@@ -5,10 +5,10 @@
 #include "physics/FastPhysicsEngine.hpp"
 #include "physics/DebugPhysicsBody.hpp"
 
-
-class StandAlonePhysics {
+class StandAlonePhysics
+{
 public:
-    static void testCollison()
+    static void testCollision()
     {
         using namespace msr::airlib;
 
@@ -22,9 +22,10 @@ public:
         msr::airlib::Environment::State initial_environment;
         initial_environment.position = initial_kinematics.pose.position;
         Environment environment(initial_environment);
+        Kinematics kinematics(initial_kinematics);
 
         DebugPhysicsBody body;
-        body.initialize(initial_kinematics, &environment);
+        body.initialize(&kinematics, &environment);
         body.reset();
 
         //create physics engine

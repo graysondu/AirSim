@@ -98,7 +98,7 @@ class AvoidLeftRight(AbstractClassGetNextVec):
 
 #compute resultant normalized vector, distance and angle
 def get_vec_dist_angle (goal, pos):
-    vec = np.array(goal - np.array(pos))
+    vec = np.array(goal) - np.array(pos)
     dist = math.sqrt(vec[0]**2 + vec[1]**2)
     angle = math.atan2(vec[1],vec[0])
     if angle > math.pi:
@@ -182,7 +182,7 @@ limit_yaw = 5
 step = 0.1
 
 responses = client.simGetImages([
-    airsim.ImageRequest("1", airsim.ImageType.DepthPlanner, True)])
+    airsim.ImageRequest("1", airsim.ImageType.DepthPlanar, True)])
 response = responses[0]
 
 #initial position
@@ -197,7 +197,7 @@ for z in range(10000): # do few times
 
     # get response
     responses = client.simGetImages([
-        airsim.ImageRequest("1", airsim.ImageType.DepthPlanner, True)])
+        airsim.ImageRequest("1", airsim.ImageType.DepthPlanar, True)])
     response = responses[0]
 
     # get numpy array
